@@ -49,6 +49,7 @@ export function OrderDialog({
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
+          user_id: 1, // Added this line - hardcoded for now
           symbol: "NIFTY", // Need to make this dynamic based on selected index
           strike: strikePrice,
           optionType,

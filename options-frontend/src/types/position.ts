@@ -6,5 +6,6 @@ export type Position = {
   quantity: number;
   average_price: number;
   pnl: number;
+  trade_id: string;
   // Add other fields as needed
 };

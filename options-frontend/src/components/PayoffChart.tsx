@@ -58,7 +58,7 @@ export function PayoffChart() {
   useEffect(() => {
     const fetchPositions = async () => {
       try {
-        const response = await fetch("http://localhost:8000/positions");
+        const response = await fetch("http://localhost:8000/db-positions/1");
         if (!response.ok) throw new Error("Failed to fetch positions");
         const json = await response.json();
         setPositions(json.data.net || []);

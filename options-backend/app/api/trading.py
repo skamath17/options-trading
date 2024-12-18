@@ -16,11 +16,11 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# Create router
+# Create router. Make sure you update everywhere
 router = APIRouter()
 
 kite = KiteConnect(api_key=os.getenv("KITE_API_KEY"))
-access_token = "eUaDFRsjI1kKP2XCuLFtM6yhrY5TVsAo"
+access_token = "8506uEo0X7auounuWiAvrpZWYnH2WA62"
 kite.set_access_token(access_token)
 
 def serialize_dates(obj):
@@ -164,44 +164,46 @@ async def place_order(order_details: dict, db: Session = Depends(get_db)):
         month_letter = month_letters[current_expiry.month]
         expiry_str = f"{current_expiry.strftime('%y')}{month_letter}{current_expiry.strftime('%d')}"
         
-        # Construct trading symbol
-        trading_symbol = f"{order_details['symbol']}{expiry_str}{order_details['strike']}{order_details['optionType']}"
-        
-        logger.info(f"Constructed trading symbol: {trading_symbol}")
-        
-        # Check for existing open position for this instrument and user
+        # Construct base instrument (e.g., NIFTY24D19)
         base_instrument = f"{order_details['symbol']}{expiry_str}"
+
+        # Check for existing position with this instrument (regardless of status)
         existing_position = db.query(Position).filter(
-            #Position.user_id == order_details['user_id'],
-            Position.user_id == 1,
-            Position.instrument == base_instrument,
-            Position.status == "OPEN"
+            Position.user_id == order_details['user_id'],
+            Position.instrument == base_instrument
         ).first()
 
-        # Create or get position_id
-        if not existing_position:
-            position = Position(
-                #user_id=order_details['user_id'],
-                user_id=1,
+        if existing_position:
+            # Reuse existing position and mark it as OPEN
+            position_id = existing_position.position_id
+            existing_position.status = "OPEN"
+            existing_position.start_time = datetime.utcnow()  # Update start time
+            existing_position.end_time = None  # Clear end time
+            existing_position.total_pnl = None  # Clear total PNL
+        else:
+            # Create new position
+            new_position = Position(
+                user_id=order_details['user_id'],
                 strategy_name=order_details.get('strategy_name', 'Custom'),
                 instrument=base_instrument,
                 start_time=datetime.utcnow(),
                 status="OPEN"
             )
-            db.add(position)
+            db.add(new_position)
             db.flush()
-            position_id = position.position_id
-        else:
-            position_id = existing_position.position_id
+            position_id = new_position.position_id
 
+        # Construct trading symbol
+        trading_symbol = f"{base_instrument}{order_details['strike']}{order_details['optionType']}"
+        logger.info(f"Constructed trading symbol: {trading_symbol}")
+        
         # Create trade entry
         new_trade = Trade(
             position_id=position_id,
-            #user_id=order_details['user_id'],
-            user_id=1,
+            user_id=order_details['user_id'],
             order_type=order_details['action'],
             entry_time=datetime.utcnow(),
-            entry_price=order_details.get('price', 0),  # You might want to get actual price
+            entry_price=order_details.get('price', 0),
             quantity=order_details['quantity'] * order_details['lotSize'],
             status="OPEN",
             trading_symbol=trading_symbol
@@ -239,14 +241,151 @@ async def place_order(order_details: dict, db: Session = Depends(get_db)):
         logger.error(f"Error placing order: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     
-@router.get("/positions")
-async def get_positions():
+@router.get("/db-positions/{user_id}")
+async def get_db_positions(user_id: int, db: Session = Depends(get_db)):
     try:
-        positions = kite.positions()
-        return JSONResponse(content={
+        # First get positions from Kite
+        kite_positions = kite.positions()
+        kite_open_positions = kite_positions.get('net', [])
+        
+        logger.info(f"Kite positions: {kite_open_positions}")
+        
+        # Group Kite positions by instrument (stripping off strike price and option type)
+        kite_positions_by_instrument = {}
+        for pos in kite_open_positions:
+            if pos['quantity'] != 0:
+                # Strip off last 7 characters (strikePrice + optionType) to get base instrument
+                instrument = pos['tradingsymbol'][:-7]
+                if instrument not in kite_positions_by_instrument:
+                    kite_positions_by_instrument[instrument] = []
+                kite_positions_by_instrument[instrument].append(pos)
+        
+        logger.info(f"Kite positions by instrument: {kite_positions_by_instrument}")
+        
+        # Get DB positions
+        db_positions = db.query(Position).filter(
+            Position.user_id == user_id,
+            Position.status == "OPEN"
+        ).all()
+
+        positions_data = []
+        for position in db_positions:
+            latest_trades = db.query(Trade).filter(
+                Trade.position_id == position.position_id,
+                Trade.status == "OPEN"
+            ).all()
+
+            for trade in latest_trades:
+                instrument = trade.trading_symbol[:-7]  # Strip off strike+optionType
+                
+                # Only include if instrument exists in Kite
+                if instrument in kite_positions_by_instrument:
+                    # Find matching Kite position for this trade
+                    kite_position = next(
+                        (pos for pos in kite_positions_by_instrument[instrument] 
+                         if pos['tradingsymbol'] == trade.trading_symbol),
+                        None
+                    )
+                    
+                    if kite_position:
+                        positions_data.append({
+                            "tradingsymbol": trade.trading_symbol,
+                            "quantity": kite_position['quantity'],
+                            "average_price": float(kite_position['average_price']),
+                            "pnl": float(kite_position['pnl']),
+                            "trade_id": trade.trade_id,
+                            "current_price": float(kite_position['last_price']) if 'last_price' in kite_position else 0,
+                            "order_type": trade.order_type
+                        })
+                else:
+                    # Position doesn't exist in Kite anymore, mark it as closed in our DB
+                    trade.status = "CLOSED"
+                    if all(t.status == "CLOSED" for t in latest_trades):
+                        position.status = "CLOSED"
+                        position.end_time = datetime.utcnow()
+                    db.commit()
+
+        return {
             "status": "success",
-            "data": positions
-        })
+            "data": {
+                "net": positions_data
+            }
+        }
+
     except Exception as e:
         logger.error(f"Error fetching positions: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@router.post("/square-off-trade/{trade_id}")
+async def square_off_trade(trade_id: int, db: Session = Depends(get_db)):
+    try:
+        # Get the original trade
+        original_trade = db.query(Trade).filter(Trade.trade_id == trade_id).first()
+        if not original_trade:
+            raise HTTPException(status_code=404, detail="Trade not found")
+        
+        if original_trade.status == "CLOSED":
+            raise HTTPException(status_code=400, detail="Trade is already closed")
+
+        # Determine opposite action
+        square_off_action = "BUY" if original_trade.order_type == "SELL" else "SELL"
+        
+        # Place the square-off order
+        order_params = {
+            "tradingsymbol": original_trade.trading_symbol,
+            "exchange": "NFO",  # You might want to determine this based on the symbol
+            "transaction_type": square_off_action,
+            "quantity": int(original_trade.quantity),  # Convert to int
+            "product": kite.PRODUCT_NRML,
+            "order_type": kite.ORDER_TYPE_MARKET,
+            "variety": kite.VARIETY_REGULAR
+        }
+
+        # Place order with Kite
+        order_id = kite.place_order(**order_params)
+        
+        # Get current market price
+        ltp = kite.ltp(["NFO:" + original_trade.trading_symbol])
+        exit_price = float(ltp["NFO:" + original_trade.trading_symbol]['last_price'])  # Convert to float
+
+        # Update the original trade
+        original_trade.exit_time = datetime.utcnow()
+        original_trade.exit_price = exit_price
+        original_trade.status = "CLOSED"
+        
+        # Calculate P&L using float values
+        entry_price = float(original_trade.entry_price)  # Convert Decimal to float
+        quantity = int(original_trade.quantity)  # Convert to int
+        
+        # Calculate P&L
+        if original_trade.order_type == "BUY":
+            pnl = (exit_price - entry_price) * quantity
+        else:
+            pnl = (entry_price - exit_price) * quantity
+            
+        original_trade.pnl = pnl
+
+        # Check if all trades in this position are closed
+        position = db.query(Position).filter(Position.position_id == original_trade.position_id).first()
+        all_trades = db.query(Trade).filter(Trade.position_id == position.position_id).all()
+        
+        if all(trade.status == "CLOSED" for trade in all_trades):
+            position.status = "CLOSED"
+            position.end_time = datetime.utcnow()
+            # Convert all PNL values to float before summing
+            position.total_pnl = sum(float(trade.pnl) for trade in all_trades if trade.pnl is not None)
+
+        db.commit()
+
+        return {
+            "status": "success",
+            "message": "Position squared off successfully",
+            "order_id": order_id,
+            "pnl": pnl,
+            "exit_price": exit_price
+        }
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error squaring off position: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
