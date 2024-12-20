@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useMemo } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -20,6 +20,7 @@ interface OrderDialogProps {
   optionType: "CE" | "PE";
   action: "BUY" | "SELL";
   currentPrice: number;
+  symbol: string;
 }
 
 export function OrderDialog({
@@ -29,19 +30,54 @@ export function OrderDialog({
   optionType,
   action,
   currentPrice,
+  symbol,
 }: OrderDialogProps) {
   const [quantity, setQuantity] = useState<number>(1);
+  const [hedgeStrikes, setHedgeStrikes] = useState<number>(3);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const { addPosition } = usePositions();
+  const { fetchPositions } = usePositions();
 
-  const lotSize = 25;
+  // Determine lot size based on symbol
+  const lotSize = symbol === "SENSEX" ? 10 : 25;
 
   const totalValue = quantity * currentPrice * lotSize;
+
+  // Calculate hedge strike price
+  const hedgeStrikePrice = useMemo(() => {
+    const strikeDiff = symbol === "SENSEX" ? 100 : 50;
+    const offset = hedgeStrikes * strikeDiff;
+    return optionType === "CE"
+      ? strikePrice + offset // For CE, hedge is higher
+      : strikePrice - offset; // For PE, hedge is lower
+  }, [strikePrice, optionType, hedgeStrikes, symbol]);
 
   const handleSubmit = async () => {
     try {
       setIsSubmitting(true);
 
+      if (action === "SELL") {
+        // Place hedge buy order first
+        const hedgeResponse = await fetch("http://localhost:8000/place-order", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            user_id: 1,
+            symbol,
+            strike: hedgeStrikePrice,
+            optionType,
+            action: "BUY", // Hedge is always a buy
+            quantity,
+            lotSize,
+            price: currentPrice,
+          }),
+        });
+
+        if (!hedgeResponse.ok) {
+          throw new Error("Failed to place hedge order");
+        }
+      }
       // Submit order to Kite
       const response = await fetch("http://localhost:8000/place-order", {
         method: "POST",
@@ -50,7 +86,7 @@ export function OrderDialog({
         },
         body: JSON.stringify({
           user_id: 1, // Added this line - hardcoded for now
-          symbol: "NIFTY", // Need to make this dynamic based on selected index
+          symbol, // Need to make this dynamic based on selected index
           strike: strikePrice,
           optionType,
           action,
@@ -68,14 +104,8 @@ export function OrderDialog({
 
       // If order successful, add to positions
       if (result.status === "success") {
-        addPosition({
-          strikePrice,
-          optionType,
-          action,
-          quantity,
-          entryPrice: currentPrice,
-          lotSize,
-        });
+        await fetchPositions();
+
         onClose();
       }
     } catch (error) {
@@ -91,13 +121,36 @@ export function OrderDialog({
       <DialogContent className="sm:max-w-[425px]">
         <DialogHeader>
           <DialogTitle>
-            {action} {optionType} @ {strikePrice}
+            {action} {symbol} {optionType} @ {strikePrice}
           </DialogTitle>
           <DialogDescription>
-            Place your order for NIFTY options
+            Place your order for {symbol} options
           </DialogDescription>
         </DialogHeader>
         <div className="grid gap-4 py-4">
+          {action === "SELL" && (
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-sm font-medium mb-2">
+                  Hedge Strikes Away
+                </label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={hedgeStrikes}
+                  onChange={(e) =>
+                    setHedgeStrikes(parseInt(e.target.value) || 3)
+                  }
+                />
+              </div>
+              <div>
+                <label className="text-sm font-medium mb-2">Hedge Strike</label>
+                <div className="text-sm">
+                  Buy {optionType} @ {hedgeStrikePrice}
+                </div>
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="text-sm font-medium mb-2">Lot Size</label>
@@ -138,7 +191,9 @@ export function OrderDialog({
                 : "bg-red-600 hover:bg-red-700"
             }
           >
-            Confirm {action}
+            {isSubmitting
+              ? "Placing Order..."
+              : `Confirm ${action}${action === "SELL" ? " with Hedge" : ""}`}
           </Button>
         </DialogFooter>
       </DialogContent>

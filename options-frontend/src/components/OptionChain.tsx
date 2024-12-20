@@ -29,6 +29,7 @@ type OptionData = {
   strike: number;
   CE: number | null;
   PE: number | null;
+  spotPrice?: number;
 };
 
 const indices: Index[] = [
@@ -42,6 +43,7 @@ const OptionChain = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showOrderDialog, setShowOrderDialog] = useState(false);
+  const [spotPrice, setSpotPrice] = useState<number | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<{
     strike: number;
     type: "CE" | "PE";
@@ -49,24 +51,36 @@ const OptionChain = () => {
     price: number;
   } | null>(null);
 
+  const fetchOptionChain = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch(
+        `http://localhost:8000/option-chain/${selectedIndex.symbol}`
+      );
+      if (!response.ok) throw new Error("Failed to fetch data");
+      const json = await response.json();
+      setOptionData(json.data);
+      setSpotPrice(json.spotPrice);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch data");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
-    const fetchOptionChain = async () => {
-      try {
-        setLoading(true);
-        const response = await fetch(
-          `http://localhost:8000/option-chain/${selectedIndex.symbol}`
-        );
-        if (!response.ok) throw new Error("Failed to fetch data");
-        const json = await response.json();
-        setOptionData(json.data);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to fetch data");
-      } finally {
-        setLoading(false);
-      }
+    fetchOptionChain();
+
+    // Listen for refresh events
+    const handleRefresh = () => {
+      fetchOptionChain();
     };
 
-    fetchOptionChain();
+    window.addEventListener("dataRefresh", handleRefresh);
+
+    return () => {
+      window.removeEventListener("dataRefresh", handleRefresh);
+    };
   }, [selectedIndex.symbol]);
 
   const handleTrade = (
@@ -81,25 +95,31 @@ const OptionChain = () => {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="shrink-0 p-2 border-b bg-white">
-        <Select
-          value={selectedIndex.symbol}
-          onValueChange={(value) => {
-            const index = indices.find((i) => i.symbol === value);
-            if (index) setSelectedIndex(index);
-          }}
-        >
-          <SelectTrigger className="w-[180px]">
-            <SelectValue placeholder="Select Index" />
-          </SelectTrigger>
-          <SelectContent>
-            {indices.map((index) => (
-              <SelectItem key={index.symbol} value={index.symbol}>
-                {index.name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+      <div className="shrink-0 p-2 border-b bg-white flex items-center space-x-4">
+        <div className="flex items-center gap-4">
+          <Select
+            value={selectedIndex.symbol}
+            onValueChange={(value) => {
+              const index = indices.find((i) => i.symbol === value);
+              if (index) setSelectedIndex(index);
+            }}
+          >
+            <SelectTrigger className="w-[180px]">
+              <SelectValue placeholder="Select Index" />
+            </SelectTrigger>
+            <SelectContent>
+              {indices.map((index) => (
+                <SelectItem key={index.symbol} value={index.symbol}>
+                  {index.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <div className="text-sm font-medium">
+            Spot: {spotPrice?.toFixed(2) || "-"}
+          </div>
+        </div>
       </div>
 
       <div className="flex-1 overflow-auto min-h-0">
@@ -202,6 +222,7 @@ const OptionChain = () => {
           optionType={selectedOrder.type}
           action={selectedOrder.action}
           currentPrice={selectedOrder.price}
+          symbol={selectedIndex.symbol}
         />
       )}
     </div>

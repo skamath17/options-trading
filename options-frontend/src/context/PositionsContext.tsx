@@ -1,23 +1,31 @@
 "use client";
 
-import React, { createContext, useContext, useState } from "react";
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useCallback,
+  useEffect,
+} from "react";
 
-export type Position = {
-  id: string;
-  orderId?: string;
-  strikePrice: number;
-  optionType: "CE" | "PE";
-  action: "BUY" | "SELL";
+type Position = {
+  tradingsymbol: string;
   quantity: number;
-  entryPrice: number;
-  timestamp: Date;
-  lotSize: number;
+  average_price: number;
+  pnl: number;
+  trade_id: string;
+  current_price: number;
+  order_type: "BUY" | "SELL";
+  instrument_token?: number;
 };
 
 type PositionsContextType = {
   positions: Position[];
-  addPosition: (position: Omit<Position, "id" | "timestamp">) => void;
-  removePosition: (id: string) => void;
+  loading: boolean;
+  error: string | null;
+  fetchPositions: () => Promise<void>;
+  squareOffPosition: (tradeId: string) => Promise<void>;
+  refreshData: () => Promise<void>;
 };
 
 const PositionsContext = createContext<PositionsContextType | undefined>(
@@ -26,23 +34,77 @@ const PositionsContext = createContext<PositionsContextType | undefined>(
 
 export function PositionsProvider({ children }: { children: React.ReactNode }) {
   const [positions, setPositions] = useState<Position[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const addPosition = (newPosition: Omit<Position, "id" | "timestamp">) => {
-    const position: Position = {
-      ...newPosition,
-      id: Math.random().toString(36).substring(7),
-      timestamp: new Date(),
-    };
-    setPositions((prev) => [...prev, position]);
-  };
+  const fetchPositions = useCallback(async () => {
+    try {
+      setLoading(true);
+      const response = await fetch("http://localhost:8000/db-positions/1");
+      if (!response.ok) throw new Error("Failed to fetch positions");
+      const json = await response.json();
+      setPositions(json.data.net || []);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to fetch positions"
+      );
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
-  const removePosition = (id: string) => {
-    setPositions((prev) => prev.filter((position) => position.id !== id));
-  };
+  const squareOffPosition = useCallback(
+    async (tradeId: string) => {
+      try {
+        const response = await fetch(
+          `http://localhost:8000/square-off-trade/${tradeId}`,
+          {
+            method: "POST",
+          }
+        );
+
+        if (!response.ok) {
+          throw new Error("Failed to square off position");
+        }
+
+        await fetchPositions(); // Refresh positions after square-off
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Failed to square off position"
+        );
+        throw err;
+      }
+    },
+    [fetchPositions]
+  );
+
+  const refreshData = useCallback(async () => {
+    await fetchPositions();
+    // Emit a refresh event that Option Chain can listen to
+    const event = new CustomEvent("dataRefresh");
+    window.dispatchEvent(event);
+  }, [fetchPositions]);
+
+  useEffect(() => {
+    // Initial fetch
+    refreshData();
+
+    // Set up 5-minute interval
+    const interval = setInterval(refreshData, 3 * 60 * 1000);
+
+    return () => clearInterval(interval);
+  }, [refreshData]);
 
   return (
     <PositionsContext.Provider
-      value={{ positions, addPosition, removePosition }}
+      value={{
+        positions,
+        loading,
+        error,
+        fetchPositions,
+        squareOffPosition,
+        refreshData,
+      }}
     >
       {children}
     </PositionsContext.Provider>

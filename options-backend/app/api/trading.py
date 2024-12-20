@@ -8,6 +8,7 @@ from datetime import date, datetime
 from app.models.trade import Trade
 from app.models.position import Position
 from app.database import get_db
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 # Set up logging
@@ -20,7 +21,7 @@ load_dotenv()
 router = APIRouter()
 
 kite = KiteConnect(api_key=os.getenv("KITE_API_KEY"))
-access_token = "8506uEo0X7auounuWiAvrpZWYnH2WA62"
+access_token = "PYDwU6B5BzASoeuuxJZlUt5R0NcyixH5"
 kite.set_access_token(access_token)
 
 def serialize_dates(obj):
@@ -197,19 +198,6 @@ async def place_order(order_details: dict, db: Session = Depends(get_db)):
         trading_symbol = f"{base_instrument}{order_details['strike']}{order_details['optionType']}"
         logger.info(f"Constructed trading symbol: {trading_symbol}")
         
-        # Create trade entry
-        new_trade = Trade(
-            position_id=position_id,
-            user_id=order_details['user_id'],
-            order_type=order_details['action'],
-            entry_time=datetime.utcnow(),
-            entry_price=order_details.get('price', 0),
-            quantity=order_details['quantity'] * order_details['lotSize'],
-            status="OPEN",
-            trading_symbol=trading_symbol
-        )
-        db.add(new_trade)
-        
         # Construct order params for Kite
         order_params = {
             "tradingsymbol": trading_symbol,
@@ -223,6 +211,29 @@ async def place_order(order_details: dict, db: Session = Depends(get_db)):
 
         # Place order
         order_id = kite.place_order(**order_params)
+
+        # Get order details and extract average price
+        try:
+            orders = kite.orders()
+            placed_order = next(order for order in orders if order['order_id'] == order_id)
+            entry_price = float(placed_order.get('average_price', 0))
+        except Exception as e:
+            logger.error(f"Error getting order details: {str(e)}")
+            entry_price = 0
+
+        # Create trade entry with actual entry price
+        new_trade = Trade(
+            position_id=position_id,
+            user_id=order_details['user_id'],
+            order_type=order_details['action'],
+            entry_time=datetime.utcnow(),
+            entry_price=entry_price,  # Use the actual average price
+            quantity=order_details['quantity'] * order_details['lotSize'],
+            status="OPEN",
+            trading_symbol=trading_symbol
+        )
+        db.add(new_trade)
+        
         
         # If order placement successful, commit DB changes
         db.commit()
@@ -254,7 +265,6 @@ async def get_db_positions(user_id: int, db: Session = Depends(get_db)):
         kite_positions_by_instrument = {}
         for pos in kite_open_positions:
             if pos['quantity'] != 0:
-                # Strip off last 7 characters (strikePrice + optionType) to get base instrument
                 instrument = pos['tradingsymbol'][:-7]
                 if instrument not in kite_positions_by_instrument:
                     kite_positions_by_instrument[instrument] = []
@@ -268,6 +278,26 @@ async def get_db_positions(user_id: int, db: Session = Depends(get_db)):
             Position.status == "OPEN"
         ).all()
 
+        # Collect all trading symbols to fetch quotes in a single API call
+        all_trading_symbols = []
+        for position in db_positions:
+            trades = db.query(Trade).filter(
+                Trade.position_id == position.position_id,
+                Trade.status == "OPEN"
+            ).all()
+            for trade in trades:
+                exchange = "BFO" if trade.trading_symbol.startswith("SENSEX") else "NFO"
+                all_trading_symbols.append(f"{exchange}:{trade.trading_symbol}")
+
+        # Fetch all quotes in a single API call
+        quotes = {}
+        if all_trading_symbols:
+            try:
+                quotes = kite.quote(all_trading_symbols)
+                logger.info(f"Fetched quotes: {quotes}")
+            except Exception as e:
+                logger.error(f"Error fetching quotes: {str(e)}")
+
         positions_data = []
         for position in db_positions:
             latest_trades = db.query(Trade).filter(
@@ -276,11 +306,9 @@ async def get_db_positions(user_id: int, db: Session = Depends(get_db)):
             ).all()
 
             for trade in latest_trades:
-                instrument = trade.trading_symbol[:-7]  # Strip off strike+optionType
+                instrument = trade.trading_symbol[:-7]
                 
-                # Only include if instrument exists in Kite
                 if instrument in kite_positions_by_instrument:
-                    # Find matching Kite position for this trade
                     kite_position = next(
                         (pos for pos in kite_positions_by_instrument[instrument] 
                          if pos['tradingsymbol'] == trade.trading_symbol),
@@ -288,27 +316,105 @@ async def get_db_positions(user_id: int, db: Session = Depends(get_db)):
                     )
                     
                     if kite_position:
+                        # Get latest price from quotes
+                        exchange = "BFO" if trade.trading_symbol.startswith("SENSEX") else "NFO"
+                        quote_key = f"{exchange}:{trade.trading_symbol}"
+                        latest_price = quotes.get(quote_key, {}).get('last_price', 0)
+
                         positions_data.append({
                             "tradingsymbol": trade.trading_symbol,
                             "quantity": kite_position['quantity'],
                             "average_price": float(kite_position['average_price']),
                             "pnl": float(kite_position['pnl']),
                             "trade_id": trade.trade_id,
-                            "current_price": float(kite_position['last_price']) if 'last_price' in kite_position else 0,
+                            "current_price": float(latest_price),  # Using quote API price
                             "order_type": trade.order_type
                         })
                 else:
-                    # Position doesn't exist in Kite anymore, mark it as closed in our DB
                     trade.status = "CLOSED"
                     if all(t.status == "CLOSED" for t in latest_trades):
                         position.status = "CLOSED"
                         position.end_time = datetime.utcnow()
                     db.commit()
 
+        # Get all quotes at once at the beginning
+        all_trading_symbols = []
+        for position in db_positions:
+            trades = db.query(Trade).filter(
+                Trade.position_id == position.position_id,
+                Trade.status == "OPEN"
+            ).all()
+            for trade in trades:
+                exchange = "BFO" if trade.trading_symbol.startswith("SENSEX") else "NFO"
+                all_trading_symbols.append(f"{exchange}:{trade.trading_symbol}")
+
+        # Fetch all quotes in a single API call
+        quotes = {}
+        if all_trading_symbols:
+            try:
+                quotes = kite.quote(all_trading_symbols)
+                logger.info(f"Fetched quotes: {quotes}")
+            except Exception as e:
+                logger.error(f"Error fetching quotes: {str(e)}")
+
+        # Calculate total P&L
+        total_pnl = 0
+
+        # First get the open position IDs
+        open_position_ids = db.query(Position.position_id).filter(
+            Position.user_id == user_id,
+            Position.status == "OPEN"
+        ).all()
+        open_position_ids = [p[0] for p in open_position_ids]
+
+        # Sum up PNL from closed trades directly from the Trades table
+        closed_trades_pnl = db.query(func.sum(Trade.pnl)).filter(
+            Trade.user_id == user_id,
+            Trade.status == "CLOSED",
+            Trade.position_id.in_(open_position_ids)
+        ).scalar() or 0
+
+        total_pnl = float(closed_trades_pnl)
+
+        # Calculate P&L only for open trades using quote API
+        open_trades = db.query(Trade).filter(
+            Trade.user_id == user_id,
+            Trade.status == "OPEN"
+        ).all()
+
+        # Get quotes for open trades
+        all_trading_symbols = []
+        for trade in open_trades:
+            exchange = "BFO" if trade.trading_symbol.startswith("SENSEX") else "NFO"
+            all_trading_symbols.append(f"{exchange}:{trade.trading_symbol}")
+
+        quotes = {}
+        if all_trading_symbols:
+            try:
+                quotes = kite.quote(all_trading_symbols)
+            except Exception as e:
+                logger.error(f"Error fetching quotes: {str(e)}")
+
+        # Calculate P&L for open trades
+        for trade in open_trades:
+            try:
+                exchange = "BFO" if trade.trading_symbol.startswith("SENSEX") else "NFO"
+                quote_key = f"{exchange}:{trade.trading_symbol}"
+                if quote_key in quotes and quotes[quote_key]['last_price'] is not None:
+                    current_price = float(quotes[quote_key]['last_price'])
+                    if trade.order_type == "SELL":
+                        trade_pnl = (float(trade.entry_price) - current_price) * trade.quantity
+                    else:  # BUY
+                        trade_pnl = (current_price - float(trade.entry_price)) * trade.quantity
+                    total_pnl += trade_pnl
+            except (TypeError, ValueError, KeyError) as e:
+                logger.error(f"Error calculating P&L for open trade {trade.trade_id}: {str(e)}")
+
         return {
             "status": "success",
             "data": {
-                "net": positions_data
+                "net": positions_data,
+                "total_pnl": total_pnl
             }
         }
 
@@ -324,6 +430,10 @@ async def square_off_trade(trade_id: int, db: Session = Depends(get_db)):
         if not original_trade:
             raise HTTPException(status_code=404, detail="Trade not found")
         
+        # Determine exchange based on trading symbol
+        exchange = "BFO" if original_trade.trading_symbol.startswith("SENSEX") else "NFO"
+        logger.info(f"Using exchange {exchange} for {original_trade.trading_symbol}")
+        
         if original_trade.status == "CLOSED":
             raise HTTPException(status_code=400, detail="Trade is already closed")
 
@@ -333,7 +443,7 @@ async def square_off_trade(trade_id: int, db: Session = Depends(get_db)):
         # Place the square-off order
         order_params = {
             "tradingsymbol": original_trade.trading_symbol,
-            "exchange": "NFO",  # You might want to determine this based on the symbol
+            "exchange": exchange,  # You might want to determine this based on the symbol
             "transaction_type": square_off_action,
             "quantity": int(original_trade.quantity),  # Convert to int
             "product": kite.PRODUCT_NRML,
@@ -344,9 +454,10 @@ async def square_off_trade(trade_id: int, db: Session = Depends(get_db)):
         # Place order with Kite
         order_id = kite.place_order(**order_params)
         
-        # Get current market price
-        ltp = kite.ltp(["NFO:" + original_trade.trading_symbol])
-        exit_price = float(ltp["NFO:" + original_trade.trading_symbol]['last_price'])  # Convert to float
+        # Get current market price using correct exchange
+        instrument_key = f"{exchange}:{original_trade.trading_symbol}"
+        ltp = kite.ltp([instrument_key])
+        exit_price = float(ltp[instrument_key]['last_price'])
 
         # Update the original trade
         original_trade.exit_time = datetime.utcnow()
@@ -388,4 +499,83 @@ async def square_off_trade(trade_id: int, db: Session = Depends(get_db)):
     except Exception as e:
         db.rollback()
         logger.error(f"Error squaring off position: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@router.post("/exit-all-positions/{user_id}")
+async def exit_all_positions(user_id: int, db: Session = Depends(get_db)):
+    try:
+        # Get all open trades
+        open_trades = db.query(Trade).filter(
+            Trade.user_id == user_id,
+            Trade.status == "OPEN"
+        ).all()
+
+        # Separate SELL and BUY trades
+        sell_trades = [t for t in open_trades if t.order_type == "SELL"]
+        buy_trades = [t for t in open_trades if t.order_type == "BUY"]
+
+        # Square off SELL positions first
+        for trade in sell_trades:
+            exchange = "BFO" if trade.trading_symbol.startswith("SENSEX") else "NFO"
+            order_params = {
+                "tradingsymbol": trade.trading_symbol,
+                "exchange": exchange,
+                "transaction_type": "BUY",  # Opposite of SELL
+                "quantity": abs(trade.quantity),
+                "product": kite.PRODUCT_NRML,
+                "order_type": kite.ORDER_TYPE_MARKET,
+                "variety": kite.VARIETY_REGULAR
+            }
+            order_id = kite.place_order(**order_params)
+
+            # Get order details and extract average price
+            orders = kite.orders()
+            placed_order = next(order for order in orders if order['order_id'] == order_id)
+            exit_price = float(placed_order.get('average_price', 0))
+
+            # Calculate PnL
+            pnl = (float(trade.entry_price) - exit_price) * trade.quantity
+            
+            # Update trade
+            trade.exit_price = exit_price
+            trade.exit_time = datetime.utcnow()
+            trade.pnl = pnl
+            trade.status = "CLOSED"
+
+        # Then square off BUY positions
+        for trade in buy_trades:
+            exchange = "BFO" if trade.trading_symbol.startswith("SENSEX") else "NFO"
+            order_params = {
+                "tradingsymbol": trade.trading_symbol,
+                "exchange": exchange,
+                "transaction_type": "SELL",  # Opposite of BUY
+                "quantity": abs(trade.quantity),
+                "product": kite.PRODUCT_NRML,
+                "order_type": kite.ORDER_TYPE_MARKET,
+                "variety": kite.VARIETY_REGULAR
+            }
+            order_id = kite.place_order(**order_params)
+
+            # Get order details and extract average price
+            orders = kite.orders()
+            placed_order = next(order for order in orders if order['order_id'] == order_id)
+            exit_price = float(placed_order.get('average_price', 0))
+
+            # Calculate PnL
+            pnl = (exit_price - float(trade.entry_price)) * trade.quantity
+            
+            # Update trade
+            trade.exit_price = exit_price
+            trade.exit_time = datetime.utcnow()
+            trade.pnl = pnl
+            trade.status = "CLOSED"
+
+        # Commit all changes
+        db.commit()
+
+        return {"status": "success", "message": "All positions exited"}
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error exiting all positions: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
