@@ -21,7 +21,7 @@ load_dotenv()
 router = APIRouter()
 
 kite = KiteConnect(api_key=os.getenv("KITE_API_KEY"))
-access_token = "PYDwU6B5BzASoeuuxJZlUt5R0NcyixH5"
+access_token = "0hNnBI8TRGMzre1UltTSrVB4nOO4JJ0R"
 kite.set_access_token(access_token)
 
 def serialize_dates(obj):
@@ -55,11 +55,15 @@ async def get_option_chain(symbol: str):
         # Determine the exchange and spot token based on symbol
         if symbol == "SENSEX":
             exchange = "BFO"
-            spot_token = "BSE:SENSEX"  # Changed this for SENSEX
+            spot_token = "BSE:SENSEX"
+            strike_interval = 100
+        elif symbol == "BANKNIFTY":
+            exchange = "NFO"
+            spot_token = "NSE:NIFTY BANK"  # BANKNIFTY spot token
             strike_interval = 100
         else:  # NIFTY
             exchange = "NFO"
-            spot_token = "NSE:NIFTY 50"  # Also updated NIFTY token format
+            spot_token = "NSE:NIFTY 50"
             strike_interval = 50
             
         logger.info(f"Using spot token: {spot_token}")
@@ -144,17 +148,25 @@ async def get_option_chain(symbol: str):
 @router.post("/place-order")
 async def place_order(order_details: dict, db: Session = Depends(get_db)):
     try:
+        
         logger.info(f"Placing order: {order_details}")
+        logger.info(f"Placing order for Bank Nifty : {order_details['symbol']}")
         
         # Get current expiry from instruments
-        exchange = "NFO" if order_details['symbol'] == "NIFTY" else "BFO"
+        exchange = "BFO" if order_details['symbol'] == "SENSEX" else "NFO"
         instruments = kite.instruments(exchange)
         
-        # Filter for the specific symbol and current expiry
+        # Filter for the specific symbol and current exp
+        # 
+        # 
+        # iry
         current_expiry = min(inst['expiry'] for inst in instruments 
                            if inst['name'] == order_details['symbol'] and 
                            inst['instrument_type'] in ['CE', 'PE'])
         
+        logger.info(f"Placing order for Bank Nifty : {current_expiry}")
+        
+
         # Get the month letter (A for Jan, B for Feb, etc.)
         month_letters = {
             1: 'A', 2: 'B', 3: 'C', 4: 'D', 5: 'E', 6: 'F',
@@ -167,6 +179,13 @@ async def place_order(order_details: dict, db: Session = Depends(get_db)):
         
         # Construct base instrument (e.g., NIFTY24D19)
         base_instrument = f"{order_details['symbol']}{expiry_str}"
+
+        if(order_details['symbol'] == 'NIFTY'):
+            base_instrument = "NIFTY24DEC"
+        if(order_details['symbol'] == 'SENSEX'):
+            base_instrument = "SENSEX25103"
+
+        logger.info(f"Base Instrument: {base_instrument}")
 
         # Check for existing position with this instrument (regardless of status)
         existing_position = db.query(Position).filter(
@@ -259,7 +278,7 @@ async def get_db_positions(user_id: int, db: Session = Depends(get_db)):
         kite_positions = kite.positions()
         kite_open_positions = kite_positions.get('net', [])
         
-        logger.info(f"Kite positions: {kite_open_positions}")
+        #logger.info(f"Kite positions: {kite_open_positions}")
         
         # Group Kite positions by instrument (stripping off strike price and option type)
         kite_positions_by_instrument = {}
@@ -270,7 +289,7 @@ async def get_db_positions(user_id: int, db: Session = Depends(get_db)):
                     kite_positions_by_instrument[instrument] = []
                 kite_positions_by_instrument[instrument].append(pos)
         
-        logger.info(f"Kite positions by instrument: {kite_positions_by_instrument}")
+        #logger.info(f"Kite positions by instrument: {kite_positions_by_instrument}")
         
         # Get DB positions
         db_positions = db.query(Position).filter(
@@ -294,7 +313,7 @@ async def get_db_positions(user_id: int, db: Session = Depends(get_db)):
         if all_trading_symbols:
             try:
                 quotes = kite.quote(all_trading_symbols)
-                logger.info(f"Fetched quotes: {quotes}")
+                #logger.info(f"Fetched quotes: {quotes}")
             except Exception as e:
                 logger.error(f"Error fetching quotes: {str(e)}")
 
@@ -353,7 +372,7 @@ async def get_db_positions(user_id: int, db: Session = Depends(get_db)):
         if all_trading_symbols:
             try:
                 quotes = kite.quote(all_trading_symbols)
-                logger.info(f"Fetched quotes: {quotes}")
+                #logger.info(f"Fetched quotes: {quotes}")
             except Exception as e:
                 logger.error(f"Error fetching quotes: {str(e)}")
 
@@ -501,6 +520,78 @@ async def square_off_trade(trade_id: int, db: Session = Depends(get_db)):
         logger.error(f"Error squaring off position: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
     
+@router.post("/exit-selected-positions")
+async def exit_selected_positions(request: dict, db: Session = Depends(get_db)):
+    try:
+        user_id = request["user_id"]
+        trade_ids = request["trade_ids"]
+
+        # Get all selected trades
+        trades = db.query(Trade).filter(
+            Trade.trade_id.in_(trade_ids),
+            Trade.status == "OPEN"
+        ).all()
+
+        # Separate SELL and BUY trades
+        sell_trades = [t for t in trades if t.order_type == "SELL"]
+        buy_trades = [t for t in trades if t.order_type == "BUY"]
+
+        # Square off SELL positions first
+        for trade in sell_trades:
+            exchange = "BFO" if trade.trading_symbol.startswith("SENSEX") else "NFO"
+            order_params = {
+                "tradingsymbol": trade.trading_symbol,
+                "exchange": exchange,
+                "transaction_type": "BUY",  # Opposite of SELL
+                "quantity": abs(trade.quantity),
+                "product": kite.PRODUCT_NRML,
+                "order_type": kite.ORDER_TYPE_MARKET,
+                "variety": kite.VARIETY_REGULAR
+            }
+            order_id = kite.place_order(**order_params)
+            
+            # Update trade in database
+            orders = kite.orders()
+            placed_order = next(order for order in orders if order['order_id'] == order_id)
+            exit_price = float(placed_order.get('average_price', 0))
+            
+            trade.exit_price = exit_price
+            trade.exit_time = datetime.utcnow()
+            trade.pnl = (float(trade.entry_price) - exit_price) * trade.quantity
+            trade.status = "CLOSED"
+            
+        # Then square off BUY positions
+        for trade in buy_trades:
+            exchange = "BFO" if trade.trading_symbol.startswith("SENSEX") else "NFO"
+            order_params = {
+                "tradingsymbol": trade.trading_symbol,
+                "exchange": exchange,
+                "transaction_type": "SELL",  # Opposite of BUY
+                "quantity": abs(trade.quantity),
+                "product": kite.PRODUCT_NRML,
+                "order_type": kite.ORDER_TYPE_MARKET,
+                "variety": kite.VARIETY_REGULAR
+            }
+            order_id = kite.place_order(**order_params)
+            
+            # Update trade in database
+            orders = kite.orders()
+            placed_order = next(order for order in orders if order['order_id'] == order_id)
+            exit_price = float(placed_order.get('average_price', 0))
+            
+            trade.exit_price = exit_price
+            trade.exit_time = datetime.utcnow()
+            trade.pnl = (exit_price - float(trade.entry_price)) * trade.quantity
+            trade.status = "CLOSED"
+
+        db.commit()
+        return {"status": "success", "message": "Selected positions exited"}
+
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error exiting selected positions: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+        
 @router.post("/exit-all-positions/{user_id}")
 async def exit_all_positions(user_id: int, db: Session = Depends(get_db)):
     try:
