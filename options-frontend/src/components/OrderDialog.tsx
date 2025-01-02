@@ -38,13 +38,14 @@ export function OrderDialog({
   const { fetchPositions } = usePositions();
 
   // Determine lot size based on symbol
-  const lotSize = symbol === "SENSEX" ? 10 : 25;
+  const lotSize = symbol === "SENSEX" ? 10 : symbol === "BANKNIFTY" ? 15 : 25; // NIFTY is 25
 
   const totalValue = quantity * currentPrice * lotSize;
 
   // Calculate hedge strike price
   const hedgeStrikePrice = useMemo(() => {
-    const strikeDiff = symbol === "SENSEX" ? 100 : 50;
+    const strikeDiff =
+      symbol === "SENSEX" ? 100 : symbol === "BANKNIFTY" ? 100 : 50;
     const offset = hedgeStrikes * strikeDiff;
     return optionType === "CE"
       ? strikePrice + offset // For CE, hedge is higher

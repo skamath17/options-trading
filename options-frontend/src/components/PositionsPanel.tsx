@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { usePositions } from "@/context/PositionsContext";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { XCircle } from "lucide-react";
 
 export function PositionsPanel() {
@@ -11,6 +12,8 @@ export function PositionsPanel() {
   const [lastRefreshed, setLastRefreshed] = useState<string>("");
   const [totalPnL, setTotalPnL] = useState<number>(0);
   const [isExitingAll, setIsExitingAll] = useState(false);
+  const [selectedPositions, setSelectedPositions] = useState<string[]>([]); // Array of trade_ids
+  const [isExitingSelected, setIsExitingSelected] = useState(false);
 
   // Update time only on client side
   useEffect(() => {
@@ -40,6 +43,45 @@ export function PositionsPanel() {
 
     fetchTotalPnL();
   }, [positions]);
+
+  const handleExitSelected = async () => {
+    if (!selectedPositions.length || isExitingSelected) return;
+
+    try {
+      setIsExitingSelected(true);
+      const response = await fetch(
+        "http://localhost:8000/exit-selected-positions",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            trade_ids: selectedPositions,
+            user_id: 1,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error("Failed to exit selected positions");
+      }
+
+      // Positions panel to be updated
+      // Fetch fresh positions data
+      const posResponse = await fetch("http://localhost:8000/db-positions/1");
+      if (!posResponse.ok) throw new Error("Failed to fetch positions");
+      const json = await posResponse.json();
+      setTotalPnL(json.data.total_pnl || 0);
+
+      // Clear selections
+      setSelectedPositions([]);
+    } catch (error) {
+      console.error("Error exiting selected positions:", error);
+    } finally {
+      setIsExitingSelected(false);
+    }
+  };
 
   const handleExitAll = async () => {
     if (!positions.length || isExitingAll) return;
@@ -90,14 +132,28 @@ export function PositionsPanel() {
         <div className="flex items-center gap-4">
           <h2 className="text-lg font-semibold">Open Positions</h2>
           {positions.length > 0 && (
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={handleExitAll}
-              disabled={isExitingAll}
-            >
-              {isExitingAll ? "Exiting..." : "Exit All"}
-            </Button>
+            <>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={handleExitAll}
+                disabled={isExitingAll}
+              >
+                {isExitingAll ? "Exiting..." : "Exit All"}
+              </Button>
+              {selectedPositions.length > 0 && (
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  onClick={handleExitSelected}
+                  disabled={isExitingSelected}
+                >
+                  {isExitingSelected
+                    ? "Exiting..."
+                    : `Exit Selected (${selectedPositions.length})`}
+                </Button>
+              )}
+            </>
           )}
         </div>
         <div
@@ -119,7 +175,24 @@ export function PositionsPanel() {
               className="border p-2 rounded"
             >
               <div className="flex justify-between items-center">
-                <span className="w-52">{position.tradingsymbol}</span>
+                <div className="flex items-center gap-2">
+                  <Checkbox
+                    checked={selectedPositions.includes(position.trade_id)}
+                    onCheckedChange={(checked) => {
+                      if (checked) {
+                        setSelectedPositions((prev) => [
+                          ...prev,
+                          position.trade_id,
+                        ]);
+                      } else {
+                        setSelectedPositions((prev) =>
+                          prev.filter((id) => id !== position.trade_id)
+                        );
+                      }
+                    }}
+                  />
+                  <span className="w-52">{position.tradingsymbol}</span>
+                </div>
                 <span className="w-34">
                   LTP: ₹{position.current_price.toFixed(2)}
                 </span>

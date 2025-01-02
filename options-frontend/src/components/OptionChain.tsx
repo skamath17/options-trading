@@ -1,6 +1,11 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
+import { useOptionChainStore } from "@/store/optionChainStore";
+import { indices } from "@/types";
+import { RefreshCw, Loader } from "lucide-react";
+import { Button } from "./ui/button";
+import { refreshOptionChain } from "@/services/optionChainService";
 import {
   Select,
   SelectContent,
@@ -18,32 +23,18 @@ import {
 } from "@/components/ui/table";
 import { OrderDialog } from "./OrderDialog";
 
-type Index = {
-  name: string;
-  symbol: string;
-  strikeDiff: number;
-  spotPrice: number;
-};
-
-type OptionData = {
-  strike: number;
-  CE: number | null;
-  PE: number | null;
-  spotPrice?: number;
-};
-
-const indices: Index[] = [
-  { name: "NIFTY", symbol: "NIFTY", strikeDiff: 50, spotPrice: 22000 },
-  { name: "SENSEX", symbol: "SENSEX", strikeDiff: 100, spotPrice: 80000 },
-];
-
 const OptionChain = () => {
-  const [selectedIndex, setSelectedIndex] = useState<Index>(indices[0]);
-  const [optionData, setOptionData] = useState<OptionData[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    selectedIndex,
+    optionDataMap,
+    spotPriceMap,
+    loading,
+    error,
+    setSelectedIndex,
+  } = useOptionChainStore();
+
+  const [isRefreshing, setIsRefreshing] = useState(false);
   const [showOrderDialog, setShowOrderDialog] = useState(false);
-  const [spotPrice, setSpotPrice] = useState<number | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<{
     strike: number;
     type: "CE" | "PE";
@@ -51,37 +42,16 @@ const OptionChain = () => {
     price: number;
   } | null>(null);
 
-  const fetchOptionChain = async () => {
-    try {
-      setLoading(true);
-      const response = await fetch(
-        `http://localhost:8000/option-chain/${selectedIndex.symbol}`
-      );
-      if (!response.ok) throw new Error("Failed to fetch data");
-      const json = await response.json();
-      setOptionData(json.data);
-      setSpotPrice(json.spotPrice);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to fetch data");
-    } finally {
-      setLoading(false);
-    }
+  // Get current data from cache
+  const currentOptionData = optionDataMap[selectedIndex.symbol] || [];
+  const currentSpotPrice = spotPriceMap[selectedIndex.symbol];
+
+  // Handle manual refresh
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    await refreshOptionChain();
+    setIsRefreshing(false);
   };
-
-  useEffect(() => {
-    fetchOptionChain();
-
-    // Listen for refresh events
-    const handleRefresh = () => {
-      fetchOptionChain();
-    };
-
-    window.addEventListener("dataRefresh", handleRefresh);
-
-    return () => {
-      window.removeEventListener("dataRefresh", handleRefresh);
-    };
-  }, [selectedIndex.symbol]);
 
   const handleTrade = (
     strike: number,
@@ -117,9 +87,29 @@ const OptionChain = () => {
           </Select>
 
           <div className="text-sm font-medium">
-            Spot: {spotPrice?.toFixed(2) || "-"}
+            Spot: {currentSpotPrice?.toFixed(2) || "-"}
           </div>
         </div>
+        <Button
+          size="sm"
+          onClick={handleRefresh}
+          disabled={isRefreshing}
+          className="ml-4"
+        >
+          <div className="flex items-center">
+            {isRefreshing ? (
+              <>
+                <Loader className="h-4 w-4 animate-spin mr-2" />
+                <span>Refreshing...</span>
+              </>
+            ) : (
+              <>
+                <RefreshCw className="h-4 w-4 mr-2" />
+                <span>Refresh</span>
+              </>
+            )}
+          </div>
+        </Button>
       </div>
 
       <div className="flex-1 overflow-auto min-h-0">
@@ -147,7 +137,7 @@ const OptionChain = () => {
               </TableRow>
             </TableHeader>
             <TableBody className="overflow-auto">
-              {optionData.map((row) => (
+              {currentOptionData.map((row) => (
                 <TableRow key={row.strike} className="h-6">
                   <TableCell className="py-0.5">
                     <div className="flex items-center justify-end gap-2">
@@ -213,7 +203,6 @@ const OptionChain = () => {
         )}
       </div>
 
-      {/* OrderDialog moved outside the table */}
       {selectedOrder && (
         <OrderDialog
           isOpen={showOrderDialog}

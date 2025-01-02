@@ -26,7 +26,17 @@ const OptionsDashboard = () => {
 
         {/* Right Panels */}
         <div className="space-y-2 h-full">
-          {/* Top Right - Payoff Chart */}
+          {/* Top Right - Positions Panel */}
+          <Card className="h-[58%]">
+            <CardHeader className="py-2">
+              <CardTitle className="text-lg">Positions & P/L</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <PositionsPanel />
+            </CardContent>
+          </Card>
+
+          {/* Bottom Right - Strategy Payoff */}
           <Card className="h-[40%]">
             <CardHeader className="py-2">
               <CardTitle className="text-lg">Strategy Payoff</CardTitle>
@@ -35,16 +45,6 @@ const OptionsDashboard = () => {
               {" "}
               {/* Add this height calculation */}
               <PayoffChart />
-            </CardContent>
-          </Card>
-
-          {/* Bottom Right - Positions */}
-          <Card className="h-[58%]">
-            <CardHeader className="py-2">
-              <CardTitle className="text-lg">Positions & P/L</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <PositionsPanel />
             </CardContent>
           </Card>
         </div>
