@@ -1,8 +1,23 @@
 import { useOptionChainStore } from "@/store/optionChainStore";
 import { indices } from "@/types";
 
-const fetchOptionChain = async (symbol: string) => {
+const fetchOptionChain = async (
+  symbol: string,
+  forceRefresh: boolean = false
+) => {
   const store = useOptionChainStore.getState();
+  const lastUpdate = store.lastUpdated[symbol] || 0;
+  const isCacheValid = Date.now() - lastUpdate < 60000;
+
+  // Check cache only if not forcing refresh
+  if (
+    !forceRefresh &&
+    isCacheValid &&
+    store.optionDataMap[symbol]?.length > 0
+  ) {
+    console.log(`Using cached data for ${symbol}`);
+    return;
+  }
 
   try {
     const response = await fetch(
@@ -11,19 +26,35 @@ const fetchOptionChain = async (symbol: string) => {
     if (!response.ok) throw new Error("Failed to fetch data");
     const json = await response.json();
 
-    // Update cache without setting loading state
     store.setOptionDataForSymbol(symbol, json.data);
     store.setSpotPriceForSymbol(symbol, json.spotPrice);
   } catch (err) {
     console.error("Error updating cache:", err);
+    if (!store.optionDataMap[symbol]) {
+      throw err;
+    }
+  }
+};
+
+export const fetchInitialData = async () => {
+  const store = useOptionChainStore.getState();
+  store.setLoading(true);
+
+  try {
+    // Force refresh on initial load
+    await fetchOptionChain(store.selectedIndex.symbol, true);
+    store.setError(null);
+  } catch (err) {
+    store.setError(err instanceof Error ? err.message : "Failed to fetch data");
+  } finally {
+    store.setLoading(false);
   }
 };
 
 const initializeCache = async () => {
   console.log("Initializing cache for all indices");
-  for (const index of indices) {
-    await fetchOptionChain(index.symbol);
-  }
+  const promises = indices.map((index) => fetchOptionChain(index.symbol));
+  await Promise.allSettled(promises);
 };
 
 export const startOptionChainRefresh = (): (() => void) => {
@@ -31,18 +62,17 @@ export const startOptionChainRefresh = (): (() => void) => {
   initializeCache();
 
   // Set up periodic cache refresh
-  const interval = setInterval(initializeCache, 60 * 1000); // every minute
+  const interval = setInterval(initializeCache, 60 * 1000);
 
   return () => clearInterval(interval);
 };
 
-// Add function for manual refresh
 export const refreshOptionChain = async () => {
   const store = useOptionChainStore.getState();
   store.setLoading(true);
 
   try {
-    await initializeCache();
+    await fetchOptionChain(store.selectedIndex.symbol);
     store.setError(null);
   } catch (err) {
     store.setError(err instanceof Error ? err.message : "Failed to fetch data");

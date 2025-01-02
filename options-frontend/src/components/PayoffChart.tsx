@@ -1,6 +1,4 @@
-"use client";
-
-import { useEffect, useState } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import { usePositions } from "@/context/PositionsContext";
 import {
   LineChart,
@@ -12,14 +10,9 @@ import {
   ReferenceLine,
 } from "recharts";
 
-type Position = {
-  tradingsymbol: string;
-  quantity: number;
-  average_price: number;
-  current_price: number;
+type PayoffDataPoint = {
+  spotPrice: number;
   pnl: number;
-  trade_id: string;
-  order_type: "BUY" | "SELL";
 };
 
 type PayoffMetrics = {
@@ -28,162 +21,201 @@ type PayoffMetrics = {
   breakEvenPoints: number[];
 };
 
+type PositionDetails = {
+  symbol: string;
+  strike: number;
+  type: "CE" | "PE";
+  quantity: number;
+  entryPrice: number;
+  expiry: string;
+};
+
 export function PayoffChart() {
   const { positions } = usePositions();
-  const [payoffData, setPayoffData] = useState<
-    Array<{ spotPrice: number; pnl: number }>
-  >([]);
-
-  const calculatePayoff = (spotPrice: number, positions: Position[]) => {
-    return positions.reduce((total, position) => {
-      // Match both NIFTY and SENSEX patterns
-      const matches = position.tradingsymbol.match(
-        /^(NIFTY|SENSEX)(\d{2}[A-Z]\d{2})(\d+)(CE|PE)$/
-      );
-      if (!matches) return total;
-
-      const strike = parseInt(matches[3]);
-      const optionType = matches[4];
-      const quantity = position.quantity; // This is already positive/negative based on buy/sell
-      const entryPrice = position.current_price; // Use current_price from API
-
-      let profit = 0;
-      if (optionType === "CE") {
-        // For Call options
-        const optionValue = Math.max(0, spotPrice - strike);
-        profit = (optionValue - entryPrice) * quantity; // quantity is already signed (+/-)
-      } else {
-        // For Put options
-        const optionValue = Math.max(0, strike - spotPrice);
-        profit = (optionValue - entryPrice) * quantity; // quantity is already signed (+/-)
-      }
-
-      return total + profit;
-    }, 0);
-  };
-
-  useEffect(() => {
-    if (positions.length === 0) return;
-
-    const calculatePayoffData = () => {
-      // ... existing calculation code ...
-    };
-
-    calculatePayoffData();
-  }, [positions]); // This will now trigger whenever positions change
-
-  useEffect(() => {
-    if (positions.length === 0) return;
-
-    const calculatePayoffData = () => {
-      // Extract strikes and determine if we're dealing with NIFTY or SENSEX
-      const positionDetails = positions
-        .map((position) => {
-          const matches = position.tradingsymbol.match(
-            /^(NIFTY|SENSEX)(\d{2}[A-Z]\d{2})(\d+)(CE|PE)$/
-          );
-          return matches
-            ? {
-                symbol: matches[1],
-                strike: parseInt(matches[3]),
-              }
-            : null;
-        })
-        .filter(
-          (detail): detail is NonNullable<typeof detail> => detail !== null
-        );
-
-      if (positionDetails.length === 0) return;
-
-      const isNifty = positionDetails[0].symbol === "NIFTY";
-      const strikeStep = isNifty ? 50 : 100;
-      const rangeOffset = isNifty ? 1000 : 2000;
-
-      const strikes = positionDetails.map((detail) => detail.strike);
-      const minStrike = Math.min(...strikes);
-      const maxStrike = Math.max(...strikes);
-
-      const points = [];
-      for (
-        let spotPrice = minStrike - rangeOffset;
-        spotPrice <= maxStrike + rangeOffset;
-        spotPrice += strikeStep
-      ) {
-        points.push({
-          spotPrice,
-          pnl: calculatePayoff(spotPrice, positions),
-        });
-      }
-
-      setPayoffData(points);
-    };
-
-    calculatePayoffData();
-  }, [positions]);
-
+  const [payoffData, setPayoffData] = useState<PayoffDataPoint[]>([]);
   const [metrics, setMetrics] = useState<PayoffMetrics>({
     maxProfit: 0,
     maxLoss: 0,
     breakEvenPoints: [],
   });
 
+  // Parse position details with corrected regex
+  const positionDetails = useMemo<PositionDetails[]>(() => {
+    try {
+      const details = positions.reduce<PositionDetails[]>((acc, position) => {
+        // Updated regex to match format: SENSEX2510378000CE
+        // Group 1: Symbol (SENSEX/NIFTY)
+        // Group 2: Year (25)
+        // Group 3: Month (1)
+        // Group 4: Day (03)
+        // Group 5: Strike (78000)
+        // Group 6: Option Type (CE/PE)
+        const matches = position.tradingsymbol.match(
+          /^(NIFTY|SENSEX)(\d{2})(\d)(\d{2})(\d+)(CE|PE)$/
+        );
+
+        console.log("Processing:", {
+          symbol: position.tradingsymbol,
+          matches: matches,
+        });
+
+        if (!matches) {
+          console.log("No match for:", position.tradingsymbol);
+          return acc;
+        }
+
+        const [_, symbol, year, month, day, strikeStr, type] = matches;
+        const strike = parseInt(strikeStr);
+        const expiry = `${year}-${month}-${day}`;
+
+        console.log("Extracted:", {
+          symbol,
+          year,
+          month,
+          day,
+          strike,
+          type,
+        });
+
+        return [
+          ...acc,
+          {
+            symbol,
+            strike,
+            type: type as "CE" | "PE",
+            quantity: position.quantity,
+            entryPrice: position.current_price,
+            expiry,
+          },
+        ];
+      }, []);
+
+      console.log("Final position details:", details);
+      return details;
+    } catch (error) {
+      console.error("Error processing positions:", error);
+      return [];
+    }
+  }, [positions]);
+
+  // Generate payoff data points
   useEffect(() => {
-    if (payoffData.length === 0) return;
+    if (positionDetails.length === 0) {
+      console.log("No position details available");
+      setPayoffData([]);
+      setMetrics({ maxProfit: 0, maxLoss: 0, breakEvenPoints: [] });
+      return;
+    }
 
-    // Calculate metrics
-    const pnls = payoffData.map((point) => point.pnl);
-    const maxProfit = Math.max(...pnls);
-    const maxLoss = Math.min(...pnls);
+    try {
+      const isNifty = positionDetails[0].symbol === "NIFTY";
+      const strikeStep = isNifty ? 50 : 100;
+      const rangeOffset = isNifty ? 1000 : 2000;
 
-    // Find break-even points (where PnL crosses 0)
-    const breakEvenPoints = payoffData.reduce(
-      (points: number[], point, index) => {
-        if (index === 0) return points;
-        const prevPoint = payoffData[index - 1];
-        // If PnL changes sign between two points, there's a break-even point
+      const strikes = positionDetails.map((p) => p.strike);
+      const minStrike = Math.min(...strikes);
+      const maxStrike = Math.max(...strikes);
+
+      console.log("Calculation range:", {
+        minStrike,
+        maxStrike,
+        rangeOffset,
+        strikeStep,
+      });
+
+      const points: PayoffDataPoint[] = [];
+      for (
+        let spotPrice = minStrike - rangeOffset;
+        spotPrice <= maxStrike + rangeOffset;
+        spotPrice += strikeStep / 2
+      ) {
+        let totalPnl = 0;
+
+        positionDetails.forEach((position) => {
+          const optionValue =
+            position.type === "CE"
+              ? Math.max(0, spotPrice - position.strike)
+              : Math.max(0, position.strike - spotPrice);
+
+          const positionPnl =
+            (optionValue - position.entryPrice) * position.quantity;
+          totalPnl += positionPnl;
+        });
+
+        points.push({ spotPrice, pnl: totalPnl });
+      }
+
+      console.log("Generated points:", {
+        count: points.length,
+        first: points[0],
+        last: points[points.length - 1],
+      });
+
+      // Calculate metrics
+      const pnls = points.map((p) => p.pnl);
+      const maxProfit = Math.max(...pnls);
+      const maxLoss = Math.min(...pnls);
+
+      // Find break-even points
+      const breakEvenPoints = points.reduce<number[]>((acc, point, index) => {
+        if (index === 0) return acc;
+        const prevPoint = points[index - 1];
+
         if (prevPoint.pnl * point.pnl < 0) {
-          // Linear interpolation to find more accurate break-even point
           const ratio =
             Math.abs(prevPoint.pnl) /
             (Math.abs(prevPoint.pnl) + Math.abs(point.pnl));
           const breakEven =
             prevPoint.spotPrice +
             (point.spotPrice - prevPoint.spotPrice) * ratio;
-          points.push(Math.round(breakEven));
+          return [...acc, Math.round(breakEven)];
         }
-        return points;
-      },
-      []
-    );
+        return acc;
+      }, []);
 
-    setMetrics({ maxProfit, maxLoss, breakEvenPoints });
-  }, [payoffData]);
+      setPayoffData(points);
+      setMetrics({ maxProfit, maxLoss, breakEvenPoints });
+    } catch (error) {
+      console.error("Error generating payoff data:", error);
+    }
+  }, [positionDetails]);
+
+  if (positions.length === 0) {
+    return (
+      <div className="w-full h-full flex items-center justify-center text-gray-500">
+        No positions to display
+      </div>
+    );
+  }
 
   return (
-    <div className="w-full h-full min-h-[300px] flex gap-2">
+    <div className="w-full h-full flex gap-4" style={{ minHeight: "300px" }}>
       <div className="flex-1">
-        {positions.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-gray-500">
-            No positions to display
-          </div>
-        ) : (
+        {payoffData.length > 0 ? (
           <LineChart
-            width={500}
+            width={600}
             height={300}
             data={payoffData}
-            margin={{ top: 20, right: 30, bottom: 30, left: 50 }}
+            margin={{ top: 10, right: 30, bottom: 20, left: 40 }}
           >
-            <CartesianGrid strokeDasharray="3 3" />
+            <CartesianGrid strokeDasharray="3 3" stroke="#666" opacity={0.3} />
             <XAxis
               dataKey="spotPrice"
               label={{ value: "Spot Price", position: "bottom" }}
+              tickFormatter={(value) => value.toLocaleString()}
             />
             <YAxis
               label={{ value: "P&L", angle: -90, position: "insideLeft" }}
+              tickFormatter={(value) => `₹${value.toLocaleString()}`}
             />
             <Tooltip
-              formatter={(value: number) => [`₹${value.toFixed(2)}`, "P&L"]}
-              labelFormatter={(label: number) => `Spot Price: ${label}`}
+              formatter={(value: number) => [
+                `₹${value.toLocaleString()}`,
+                "P&L",
+              ]}
+              labelFormatter={(label: number) =>
+                `Spot Price: ${label.toLocaleString()}`
+              }
             />
             <ReferenceLine y={0} stroke="#666" />
             <Line
@@ -192,40 +224,44 @@ export function PayoffChart() {
               stroke="#8884d8"
               dot={false}
               strokeWidth={2}
+              animationDuration={300}
             />
           </LineChart>
+        ) : (
+          <div className="w-full h-full flex items-center justify-center text-gray-500">
+            Processing data...
+          </div>
         )}
       </div>
-      {positions.length > 0 && (
-        <div className="min-w-[100px] text-xs flex flex-col justify-center gap-2">
-          <div>
-            <div className="text-gray-500">Max Profit</div>
-            <div className="font-semibold text-green-600">
-              ₹{metrics.maxProfit.toFixed(2)}
-            </div>
-          </div>
 
-          <div>
-            <div className="text-gray-500">Max Loss</div>
-            <div className="font-semibold text-red-600">
-              ₹{metrics.maxLoss.toFixed(2)}
-            </div>
-          </div>
-
-          <div>
-            <div className="text-gray-500">Break-even</div>
-            {metrics.breakEvenPoints.length > 0 ? (
-              metrics.breakEvenPoints.map((point, index) => (
-                <div key={index} className="font-semibold">
-                  ₹{point.toLocaleString()}
-                </div>
-              ))
-            ) : (
-              <div className="text-gray-400">N/A</div>
-            )}
+      <div className="min-w-[120px] flex flex-col justify-center gap-4 p-2">
+        <div>
+          <div className="text-sm text-gray-500">Max Profit</div>
+          <div className="font-semibold text-green-600">
+            ₹{metrics.maxProfit.toLocaleString()}
           </div>
         </div>
-      )}
+
+        <div>
+          <div className="text-sm text-gray-500">Max Loss</div>
+          <div className="font-semibold text-red-600">
+            ₹{metrics.maxLoss.toLocaleString()}
+          </div>
+        </div>
+
+        <div>
+          <div className="text-sm text-gray-500">Break-even Points</div>
+          {metrics.breakEvenPoints.length > 0 ? (
+            metrics.breakEvenPoints.map((point, index) => (
+              <div key={index} className="font-semibold">
+                ₹{point.toLocaleString()}
+              </div>
+            ))
+          ) : (
+            <div className="text-gray-400">N/A</div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

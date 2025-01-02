@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useOptionChainStore } from "@/store/optionChainStore";
 import { indices } from "@/types";
 import { RefreshCw, Loader } from "lucide-react";
 import { Button } from "./ui/button";
 import { refreshOptionChain } from "@/services/optionChainService";
+import { fetchInitialData } from "@/services/optionChainService";
 import {
   Select,
   SelectContent,
@@ -32,6 +33,14 @@ const OptionChain = () => {
     error,
     setSelectedIndex,
   } = useOptionChainStore();
+
+  // Add this for initial load
+  useEffect(() => {
+    if (!optionDataMap[selectedIndex.symbol]?.length) {
+      console.log("Fetching initial data...");
+      fetchInitialData();
+    }
+  }, []); // Empty dependency array for initial load only
 
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showOrderDialog, setShowOrderDialog] = useState(false);
